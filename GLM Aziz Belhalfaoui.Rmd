@@ -1,0 +1,295 @@
+---
+title: "GLM"
+author: "Belhalfaoui Aziz"
+date: "2024-06-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# ----------------------------------------
+# Projet 30 Juin - modele lineaire GLM
+# ----------------------------------------
+
+
+```{r import}
+library(tidyverse)
+#import de la base de données
+meteo <- read.csv("C:/Users/BelhaA/OneDrive - Louis Dreyfus Company/Desktop/Master Statistiques et Big Data - 2024/Rproject/Modele Lineraire Generalisé - Robin/meteo.train.csv")
+str(meteo)
+```
+
+# ----------------------------------------
+# Exploration et cleaning des données
+# ----------------------------------------
+
+Exploration de la base de données (donneés manquantes)
+
+```{r missing rows}
+#find missing rows
+find_missing_rows <- function(data) {
+  missing_rows <- data %>% 
+    mutate(row_number = row_number()) %>%
+    filter(if_any(everything(), is.na)) %>%
+    pull(row_number)
+  
+  if (length(missing_rows) == 0) {
+    message("Pas de données manquantes")
+  } else {
+    message("Lignes avec des valeurs manquantes : ", paste(missing_rows, collapse = ", "))
+  }
+}
+
+find_missing_rows(meteo)
+```
+
+On voit qu'un certain nombre de variables sont tres correlées entre elles. Il est donc important de cleaner la base de donnée
+
+```{r etude de correlation}
+#etude de correlation
+library(corrplot)
+corr_matrix = cor(cbind(meteo[, 7:46], meteo$pluie.demain == "TRUE"))
+corrplot(corr_matrix, tl.cex = 0.7)
+```
+
+On supprime toutes les variables qui ont plus de 80% de correlation
+Notre nouvelle base de donnée ne comporte plus que 27 variables
+
+```{r cleaning}
+# cleaning de la bdd
+library(caret)
+highly_correlated <- findCorrelation(corr_matrix, cutoff = 0.8)
+toremove = colnames(corr_matrix)[highly_correlated]
+
+meteo_clean =  meteo %>% 
+  select(-one_of(toremove), -c(1,5,6))
+
+str(meteo_clean)
+```
+
+```{r corrplot}
+#test du corrplot sur les nouvelles données
+corrplot(cor(cbind(meteo_clean[, 4:26], meteo$pluie.demain == "TRUE")), tl.cex = 0.7)
+
+```
+
+
+# ----------------------------------------
+# Lancement et test du modele
+# ----------------------------------------
+
+
+Test du modele saturé
+
+```{r g1}
+g1 = glm(pluie.demain ~ ., data = meteo_clean, family = binomial)
+summary(g1)
+```
+
+Perfectionnement du modele par la selection automatique de variables selon le critere AIC
+La deviance de notre modele Mk semble plus elevée que celle du modele saturé (bien que de peu)
+Le modele a une deviance residuelle superieure au nombre de degrés de liberté, il ne capte pas bien toute la variabilité des données
+
+```{r g2}
+g2 = step(g1)
+summary(g2)
+```
+
+Preference pour le modele g2, peu de difference de deviance et une simplification du modele
+
+```{r anova}
+#anova
+anova(g1, g2, test = "LRT")
+```
+
+Affichage des résidus et valeurs aberrantes
+
+```{r residus}
+#affichage des résidus et identification des valeurs aberrantes
+plot(fitted(g2),g2$residuals)
+```
+
+Il semble qu'il y ai une valeur aberrante en ligne 363 (que nous decidons de garder)
+
+```{r cook}
+plot(cooks.distance(g2))
+```
+
+Pas de problème de multicollinéarité significatif
+
+```{r vif}
+#test de multicolinearité
+library(car)
+vif(g2)
+```
+
+
+# ----------------------------------------
+# validation croisée
+# ----------------------------------------
+
+Separation en données de test et entrainement
+```{r valida}
+#validation croisée
+train_indices = sample(c(T, F), nrow(meteo_clean), replace = T, prob = c(.8, .2))
+meteo_train = meteo_clean[train_indices,]
+meteo_test = meteo_clean[!train_indices,]
+```
+
+
+```{r modele}
+g3 =  glm(pluie.demain ~ 
+              Year+
+              Temperature.daily.mean..2.m.above.gnd.+
+              Mean.Sea.Level.Pressure.daily.mean..MSL.+
+              Snowfall.amount.raw.daily.sum..sfc.+
+              Medium.Cloud.Cover.daily.mean..mid.cld.lay.+
+              Shortwave.Radiation.daily.sum..sfc.+
+              Wind.Direction.daily.mean..80.m.above.gnd.+
+              Wind.Direction.daily.mean..900.mb.+
+              Relative.Humidity.daily.max..2.m.above.gnd.+
+              Total.Cloud.Cover.daily.min..sfc.+
+              High.Cloud.Cover.daily.max..high.cld.lay.+
+              Medium.Cloud.Cover.daily.max..mid.cld.lay.+
+              Low.Cloud.Cover.daily.max..low.cld.lay.+
+              Wind.Speed.daily.max..80.m.above.gnd., 
+              
+              data = meteo_train, 
+              family = binomial)
+
+
+summary(g3)
+```
+
+Mesure de l'erreur
+
+```{r erreur}
+pred = predict(g2,type = "response")
+predsat = predict(g1, type = "response")
+
+mean(abs(pred - meteo_clean$pluie.demain), na.rm = T)
+```
+
+Via la validation croisée
+On voit que l'erreur de prediction est tres faible
+Notre modele est robuste et a une bonne capacité predictive
+
+```{r erreur2}
+predcv = predict(g3, meteo_test, type = "response")
+
+mean(abs(predcv - meteo_test$pluie.demain), na.rm = T)
+```
+
+# ----------------------------------------
+# Evalutation finale
+# ----------------------------------------
+
+Creation de la courbe ROC
+
+```{r final}
+library(pROC)
+library(ROCR)
+# Création de la courbe ROC
+roc_curve = roc(meteo_clean$pluie.demain, pred)
+roc_curve_sat = roc(meteo_clean$pluie.demain, predsat) 
+```
+
+Identification du seuil ideal qui permettrait de minimiser les faux positifs tout en maintenant un FPR acceptable
+
+```{r final2}
+#identification du TPR mini et du FPR ideal
+coords <- coords(roc_curve, "best", best.method = "youden")
+best_threshold <- coords$threshold
+best_threshold
+```
+
+Par simple comparaison, on affiche la courbe ROC du modele mk et du modele saturé
+Visualisation du taux de vrai positifs et faux positifs en fonction du seuil de decision
+
+```{r plot}
+par(mfrow = c(1, 2))
+plot(roc_curve, col = "blue", main = "ROC Curve modele mk")
+points(coords, col = "red")
+plot(roc_curve_sat, col = "blue", main = "ROC Curve modele sat")
+points(coords, col = "red")
+```
+
+
+Tres bonne performance globale du modele
+Le modele saturé a un meilleure AUC que le modele simple, mais la difference est peu significative
+
+```{r auc3}
+#determination de l'AUC
+auc_roc_curve = auc(roc_curve)
+auc_roc_curve_sat = auc(roc_curve_sat)
+
+print(paste("AUC for the regular model:", auc_roc_curve, "& AUC for the saturated model:", auc_roc_curve_sat))
+
+```
+
+```{r pred2}
+pred2 = (pred >= best_threshold)
+```
+
+
+Vrai positifs = 425
+vrai negatifs = 452
+Faux positifs = 128
+Faux negatifs = 176
+
+```{r matrice confus}
+table(pred2, meteo_clean$pluie.demain) #matrice de confusion
+```
+
+74.23% de bonnes prédictions
+Le modele a une accuracy relativement bonne
+
+```{r repdicts}
+mean(pred2 == (meteo_clean$pluie.demain == "TRUE")) 
+
+```
+
+
+
+# ----------------------------------------
+# Test sur la base de test
+# ----------------------------------------
+
+```{r auc}
+#import de la base de données
+meteo_vtest <- read.csv("C:/Users/BelhaA/OneDrive - Louis Dreyfus Company/Desktop/Master Statistiques et Big Data - 2024/Rproject/Modele Lineraire Generalisé - Robin/meteo.test.csv")
+```
+
+
+```{r auc2}
+meteo_vtest$pluie.demain = NA
+
+predictions_finale <- ifelse(predict(g3, newdata = meteo_vtest, type = "response")> 0.5645773, TRUE, FALSE)
+
+
+meteo_vtest$pluie.demain = predictions_finale
+
+meteo_vtest$pluie.demain
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
